@@ -26,7 +26,7 @@
   h1,h2,h3{margin:0 0 10px}
   .muted{color:var(--muted)} .small{font-size:.92rem}
   label{display:block; font-weight:600; margin:10px 0 6px}
-  input,button,textarea{font:inherit; color:var(--text)}
+  input,button,textarea,select{font:inherit; color:var(--text)}
   input,textarea,select{
     width:100%; background:#121530; border:var(--bd); border-radius:10px; padding:10px 12px; outline:none;
   }
@@ -106,7 +106,7 @@
     <h3>Notes</h3>
     <ul class="small muted">
       <li>This runs in your browser. Leaving the tab or device may pause it.</li>
-      <li>Use the CORS helper if the target page blocks cross-origin fetches. It uses a read-only proxy (<code>https://r.jina.ai/http://…</code>) that returns page text.</li>
+      <li>Use the CORS helper if the target page blocks cross-origin fetches. It uses a read-only proxy (<code>https://r.jina.ai/https://…</code>) that returns page text.</li>
       <li>If you pasted your token publicly anywhere, <strong>regenerate it in @BotFather</strong> afterward.</li>
       <li>Please respect sites’ Terms of Service and avoid aggressive polling.</li>
     </ul>
@@ -158,20 +158,38 @@ document.querySelectorAll('input').forEach(i=>i.addEventListener('input', saveSe
 
 function buildFetchUrl(url, useProxy){
   if(!useProxy) return url;
-  // r.jina.ai proxy returns rendered text of the target URL (GET only, read-only)
+  // Preserve the original protocol; r.jina.ai expects the full scheme after the slash:
+  //   https://r.jina.ai/https://example.com/path
+  //   https://r.jina.ai/http://example.com/path
   const u = new URL(url);
-  return `https://r.jina.ai/http://${u.host}${u.pathname}${u.search}`;
+  return `https://r.jina.ai/${u.protocol}//${u.host}${u.pathname}${u.search}`;
 }
 
 async function fetchText(url, useProxy){
+  // Add timeout + avoid stale cache
+  const controller = new AbortController();
+  const t = setTimeout(()=>controller.abort(), 12000); // 12s timeout
+
   try{
     const resp = await fetch(buildFetchUrl(url, useProxy), {
-      headers: {'User-Agent':'WebWatcher/1.0'}
+      headers: { 'User-Agent':'Mozilla/5.0 (compatible; WebWatcher/1.0)' },
+      signal: controller.signal,
+      cache: 'no-store'
     });
-    if(!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
+    clearTimeout(t);
+
+    if(!resp.ok){
+      throw new Error(`${resp.status} ${resp.statusText}`);
+    }
     return await resp.text();
+
   }catch(e){
-    log('Fetch error: '+e.message);
+    clearTimeout(t);
+    if(!useProxy){
+      log('Fetch error (try enabling "Use CORS helper"): ' + e.message);
+    }else{
+      log('Fetch error via proxy: ' + e.message);
+    }
     return '';
   }
 }
@@ -196,14 +214,13 @@ async function getChatId(token){
     const resp = await fetch(`https://api.telegram.org/bot${encodeURIComponent(token)}/getUpdates`);
     const data = await resp.json();
     if(!data.ok) throw new Error(JSON.stringify(data));
-    // Find the most recent message update that includes a chat id
     const upd = [...(data.result||[])].reverse().find(x => x.message && x.message.chat && x.message.chat.id);
     if(upd){
       $('#chatId').value = String(upd.message.chat.id);
       saveSettings();
       log('Chat ID detected: '+upd.message.chat.id);
     }else{
-      log('No chat found. Open your bot in Telegram and send /start, then try again.');
+      log('No chat found. Open your bot and send /start, then try again.');
     }
   }catch(e){
     log('getUpdates error: '+e.message);
@@ -275,6 +292,9 @@ $('#getChatId').addEventListener('click', async ()=>{
   if(!token){ log('Enter bot token first.'); return; }
   await getChatId(token);
 });
+
+// Persist immediately on first load so your defaults are saved
+saveSettings();
 </script>
 </body>
 </html>
