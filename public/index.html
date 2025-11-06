@@ -20,7 +20,7 @@
       var(--bg);
     min-height:100vh; display:grid; place-items:start center; padding:24px;
   }
-  .wrap{width:100%; max-width:900px; display:grid; gap:16px}
+  .wrap{width:100%; max-width:980px; display:grid; gap:16px}
   .card{background:linear-gradient(180deg,rgba(255,255,255,.05),rgba(255,255,255,.02));
         border:var(--bd); border-radius:var(--br); padding:16px}
   h1,h2,h3{margin:0 0 10px}
@@ -39,6 +39,9 @@
   .danger{background:var(--danger)}
   .pill{padding:6px 10px; border-radius:999px; border:var(--bd); background:rgba(255,255,255,.06)}
   pre{white-space:pre-wrap; word-break:break-word; margin:0}
+  .grid2{display:grid; gap:12px; grid-template-columns:1fr 1fr}
+  @media (max-width:880px){ .grid2{grid-template-columns:1fr} }
+  code{background:rgba(255,255,255,.08); padding:2px 6px; border-radius:6px}
 </style>
 </head>
 <body>
@@ -46,15 +49,41 @@
 
   <div class="card">
     <h1>Web Watcher → Telegram</h1>
-    <p class="muted small">Poll a web page for text every few seconds and send yourself a Telegram message when it appears. <strong>Don’t share this page with your token.</strong></p>
+    <p class="muted small">Poll a web page and send yourself a Telegram message when your target appears. Use advanced match modes if the page renders dynamically. <strong>Don’t share this page with your token.</strong></p>
   </div>
 
   <div class="card">
     <h3>Watch settings</h3>
     <label>Page URL to watch</label>
     <input id="watchUrl" placeholder="https://example.com/page">
-    <label>Text to look for (case-insensitive)</label>
-    <input id="watchText" placeholder="e.g., in stock, tickets available, live now">
+
+    <div class="grid2">
+      <div>
+        <label>Match mode</label>
+        <select id="matchMode">
+          <option value="plain" selected>Plain contains (case-insensitive)</option>
+          <option value="regex">Regex (advanced)</option>
+          <option value="selector">CSS selector (search text in elements)</option>
+        </select>
+      </div>
+      <div id="plainRow">
+        <label>Text to look for</label>
+        <input id="watchText" placeholder='e.g., "in stock", "live now"'>
+      </div>
+      <div id="regexRow" style="display:none">
+        <label>Regex pattern (no slashes)</label>
+        <input id="regexPattern" placeholder="e.g., (in\\s*stock|available)\\b">
+        <label>Flags</label>
+        <input id="regexFlags" value="i" placeholder="i, g, m, s, u, y">
+      </div>
+      <div id="selectorRow" style="display:none">
+        <label>CSS selector</label>
+        <input id="cssSelector" placeholder=".status, #availability, td:nth-child(2)">
+        <label>Optional: text filter (contains)</label>
+        <input id="selectorFilter" placeholder="e.g., In Stock">
+      </div>
+    </div>
+
     <div class="row">
       <div style="flex:1; min-width:180px">
         <label>Poll interval (seconds)</label>
@@ -68,12 +97,20 @@
         <label>&nbsp;</label>
         <label class="row" style="gap:8px"><input id="useProxy" type="checkbox"> Use CORS helper</label>
       </div>
+      <div>
+        <label>&nbsp;</label>
+        <label class="row" style="gap:8px"><input id="normalizeWS" type="checkbox" checked> Normalize whitespace</label>
+      </div>
+      <div>
+        <label>&nbsp;</label>
+        <label class="row" style="gap:8px"><input id="useDomText" type="checkbox" checked> Use DOM text extraction</label>
+      </div>
     </div>
   </div>
 
   <div class="card">
     <h3>Telegram setup</h3>
-    <p class="small muted">Create a bot with <strong>@BotFather</strong> → <code>/newbot</code>, copy the token, then press “Get Chat ID” after you’ve sent “/start” to your bot in Telegram.</p>
+    <p class="small muted">Create a bot with <strong>@BotFather</strong> → <code>/newbot</code>, copy the token, then press “Get Chat ID” after you’ve sent <code>/start</code> to your bot.</p>
     <label>Bot token</label>
     <input id="botToken" placeholder="1234567890:ABCdefGHIjkLMNopQRstuVWxyz">
     <div class="row">
@@ -105,10 +142,9 @@
   <div class="card">
     <h3>Notes</h3>
     <ul class="small muted">
-      <li>This runs in your browser. Leaving the tab or device may pause it.</li>
-      <li>Use the CORS helper if the target page blocks cross-origin fetches. It uses a read-only proxy (<code>https://r.jina.ai/https://…</code>) that returns page text.</li>
-      <li>If you pasted your token publicly anywhere, <strong>regenerate it in @BotFather</strong> afterward.</li>
-      <li>Please respect sites’ Terms of Service and avoid aggressive polling.</li>
+      <li>If the page renders content via JavaScript, use <strong>Use DOM text extraction</strong> + <strong>CORS helper</strong>, or target specific elements with <strong>CSS selector</strong>.</li>
+      <li>The proxy (<code>https://r.jina.ai/https://…</code>) returns readable page text; heavy SPA pages may still need a server-side worker for full rendering.</li>
+      <li>Respect sites’ Terms; increase interval to avoid rate limits (e.g., 10–15s).</li>
     </ul>
   </div>
 
@@ -121,6 +157,18 @@ const statusEl = $('#status');
 let timer = null;
 let notifiedOnce = false;
 
+// UI sections switching
+const modeSel = $('#matchMode');
+const plainRow = $('#plainRow');
+const regexRow = $('#regexRow');
+const selectorRow = $('#selectorRow');
+modeSel.addEventListener('change', ()=>{
+  plainRow.style.display    = modeSel.value === 'plain'    ? '' : 'none';
+  regexRow.style.display    = modeSel.value === 'regex'    ? '' : 'none';
+  selectorRow.style.display = modeSel.value === 'selector' ? '' : 'none';
+  saveSettings();
+});
+
 function log(msg){
   const ts = new Date().toLocaleTimeString();
   logEl.textContent = `[${ts}] ${msg}\n` + logEl.textContent;
@@ -129,47 +177,58 @@ function log(msg){
 function saveSettings(){
   const data = {
     watchUrl: $('#watchUrl').value.trim(),
+    matchMode: $('#matchMode').value,
     watchText: $('#watchText').value,
+    regexPattern: $('#regexPattern')?.value || '',
+    regexFlags: $('#regexFlags')?.value || 'i',
+    cssSelector: $('#cssSelector')?.value || '',
+    selectorFilter: $('#selectorFilter')?.value || '',
     intervalSec: $('#intervalSec').value,
     sendOnce: $('#sendOnce').checked,
     useProxy: $('#useProxy').checked,
+    normalizeWS: $('#normalizeWS').checked,
+    useDomText: $('#useDomText').checked,
     botToken: $('#botToken').value.trim(),
     chatId: $('#chatId').value.trim()
   };
-  localStorage.setItem('watcherSettings', JSON.stringify(data));
+  localStorage.setItem('watcherSettingsV2', JSON.stringify(data));
 }
 
 function loadSettings(){
-  const s = localStorage.getItem('watcherSettings');
+  const s = localStorage.getItem('watcherSettingsV2');
   if(!s) return;
   try{
     const d = JSON.parse(s);
-    $('#watchUrl').value   = d.watchUrl || '';
-    $('#watchText').value  = d.watchText || '';
-    $('#intervalSec').value= d.intervalSec || 3;
-    $('#sendOnce').checked = !!d.sendOnce;
-    $('#useProxy').checked = !!d.useProxy;
-    $('#botToken').value   = d.botToken || '';
-    $('#chatId').value     = d.chatId || '';
+    $('#watchUrl').value    = d.watchUrl || '';
+    $('#matchMode').value   = d.matchMode || 'plain';
+    $('#watchText').value   = d.watchText || '';
+    $('#regexPattern').value= d.regexPattern || '';
+    $('#regexFlags').value  = d.regexFlags || 'i';
+    $('#cssSelector').value = d.cssSelector || '';
+    $('#selectorFilter').value = d.selectorFilter || '';
+    $('#intervalSec').value = d.intervalSec || 3;
+    $('#sendOnce').checked  = !!d.sendOnce;
+    $('#useProxy').checked  = !!d.useProxy;
+    $('#normalizeWS').checked = !!d.normalizeWS;
+    $('#useDomText').checked = d.useDomText !== false; // default true
+    $('#botToken').value    = d.botToken || '';
+    $('#chatId').value      = d.chatId || '';
+    // update rows
+    modeSel.dispatchEvent(new Event('change'));
   }catch{}
 }
 loadSettings();
-document.querySelectorAll('input').forEach(i=>i.addEventListener('input', saveSettings));
+document.querySelectorAll('input,select').forEach(i=>i.addEventListener('input', saveSettings));
 
 function buildFetchUrl(url, useProxy){
   if(!useProxy) return url;
-  // Preserve the original protocol; r.jina.ai expects the full scheme after the slash:
-  //   https://r.jina.ai/https://example.com/path
-  //   https://r.jina.ai/http://example.com/path
   const u = new URL(url);
   return `https://r.jina.ai/${u.protocol}//${u.host}${u.pathname}${u.search}`;
 }
 
 async function fetchText(url, useProxy){
-  // Add timeout + avoid stale cache
   const controller = new AbortController();
-  const t = setTimeout(()=>controller.abort(), 12000); // 12s timeout
-
+  const t = setTimeout(()=>controller.abort(), 15000); // 15s timeout
   try{
     const resp = await fetch(buildFetchUrl(url, useProxy), {
       headers: { 'User-Agent':'Mozilla/5.0 (compatible; WebWatcher/1.0)' },
@@ -177,12 +236,10 @@ async function fetchText(url, useProxy){
       cache: 'no-store'
     });
     clearTimeout(t);
-
     if(!resp.ok){
       throw new Error(`${resp.status} ${resp.statusText}`);
     }
     return await resp.text();
-
   }catch(e){
     clearTimeout(t);
     if(!useProxy){
@@ -191,6 +248,74 @@ async function fetchText(url, useProxy){
       log('Fetch error via proxy: ' + e.message);
     }
     return '';
+  }
+}
+
+function toDomText(html){
+  try{
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    // remove scripts/styles/noscript
+    doc.querySelectorAll('script,style,noscript').forEach(n=>n.remove());
+    const text = doc.body ? doc.body.innerText || doc.body.textContent || '' : '';
+    return text;
+  }catch{
+    return html;
+  }
+}
+
+function normalizeWS(s){
+  return s.replace(/\s+/g,' ').trim();
+}
+
+function slicePreview(s, start, len=180){
+  const a = Math.max(0, start - Math.floor(len/2));
+  const b = Math.min(s.length, a + len);
+  return s.slice(a, b);
+}
+
+function findInPlainText(fullText, needle, doNormalize){
+  const hay = doNormalize ? normalizeWS(fullText) : fullText;
+  const nee = doNormalize ? normalizeWS(needle) : needle;
+  const hayLC = hay.toLowerCase();
+  const neeLC = nee.toLowerCase();
+  const idx = hayLC.indexOf(neeLC);
+  return idx >= 0 ? { found:true, idx, preview: slicePreview(hay, idx) } : { found:false };
+}
+
+function findWithRegex(fullText, pattern, flags, doNormalize){
+  const hay = doNormalize ? normalizeWS(fullText) : fullText;
+  try{
+    const re = new RegExp(pattern, flags || 'i');
+    const m = hay.match(re);
+    if(m){
+      const idx = m.index || hay.indexOf(m[0]);
+      return { found:true, idx, preview: slicePreview(hay, idx) };
+    }
+  }catch(e){
+    log('Regex error: ' + e.message);
+  }
+  return { found:false };
+}
+
+function findWithSelector(fullHtml, selector, filterText, doNormalize){
+  try{
+    const doc = new DOMParser().parseFromString(fullHtml, 'text/html');
+    const els = selector ? [...doc.querySelectorAll(selector)] : [];
+    if(els.length === 0) return { found:false };
+    const texts = els.map(el => el.innerText || el.textContent || '').join('\n');
+    if(!filterText) {
+      // if no filter given, just report found (since elements exist)
+      return { found:true, idx:0, preview: slicePreview(texts, 0) };
+    }
+    const hay = doNormalize ? normalizeWS(texts) : texts;
+    const nee = doNormalize ? normalizeWS(filterText) : filterText;
+    const hayLC = hay.toLowerCase();
+    const neeLC = nee.toLowerCase();
+    const idx = hayLC.indexOf(neeLC);
+    return idx >= 0 ? { found:true, idx, preview: slicePreview(hay, idx) } : { found:false };
+  }catch(e){
+    log('Selector parse error: ' + e.message);
+    return { found:false };
   }
 }
 
@@ -229,19 +354,51 @@ async function getChatId(token){
 
 async function checkOnce(){
   const url = $('#watchUrl').value.trim();
-  const needle = $('#watchText').value.toLowerCase();
+  const mode = $('#matchMode').value;
+  const doNormalize = $('#normalizeWS').checked;
   const useProxy = $('#useProxy').checked;
+  const useDom = $('#useDomText').checked;
 
-  if(!url || !needle){
-    log('Please fill URL and text.');
-    return false;
+  if(!url){
+    log('Please enter a URL.');
+    return {found:false};
   }
-  const html = await fetchText(url, useProxy);
-  if(!html) return false;
 
-  const found = html.toLowerCase().includes(needle);
-  log(found ? 'Text FOUND' : 'Text not found');
-  return found;
+  const html = await fetchText(url, useProxy);
+  if(!html) return {found:false};
+
+  const base = useDom ? toDomText(html) : html;
+
+  if(mode === 'plain'){
+    const needle = $('#watchText').value;
+    if(!needle){ log('Enter text to look for.'); return {found:false}; }
+    const res = findInPlainText(base, needle, doNormalize);
+    if(res.found) log('FOUND (plain) — preview: ' + res.preview);
+    else log('Not found (plain).');
+    return res;
+  }
+
+  if(mode === 'regex'){
+    const pat = $('#regexPattern').value;
+    const flags = $('#regexFlags').value || 'i';
+    if(!pat){ log('Enter a regex pattern.'); return {found:false}; }
+    const res = findWithRegex(base, pat, flags, doNormalize);
+    if(res.found) log('FOUND (regex) — preview: ' + res.preview);
+    else log('Not found (regex).');
+    return res;
+  }
+
+  if(mode === 'selector'){
+    const sel = $('#cssSelector').value;
+    const filter = $('#selectorFilter').value;
+    if(!sel){ log('Enter a CSS selector.'); return {found:false}; }
+    const res = findWithSelector(html, sel, filter, doNormalize);
+    if(res.found) log('FOUND (selector) — preview: ' + (res.preview || '[element present]'));
+    else log('Not found (selector).');
+    return res;
+  }
+
+  return {found:false};
 }
 
 function start(){
@@ -256,10 +413,16 @@ function start(){
   notifiedOnce = false;
   statusEl.textContent = 'running…';
   timer = setInterval(async ()=>{
-    const hit = await checkOnce();
-    if(hit && (!sendOnce || !notifiedOnce)){
+    const {found} = await checkOnce();
+    if(found && (!sendOnce || !notifiedOnce)){
       notifiedOnce = true;
-      const msg = `Alert: text "${$('#watchText').value}" found at ${$('#watchUrl').value}`;
+      const mode = $('#matchMode').value;
+      const desc =
+        mode === 'plain' ? `text "${$('#watchText').value}"`
+      : mode === 'regex' ? `regex /${$('#regexPattern').value}/${$('#regexFlags').value||'i'}`
+      : `selector "${$('#cssSelector').value}"${ $('#selectorFilter').value ? ` contains "${$('#selectorFilter').value}"` : '' }`;
+
+      const msg = `Alert: ${desc} found at ${$('#watchUrl').value}`;
       await sendTelegram(token, chatId, msg);
       if(sendOnce){
         stop();
